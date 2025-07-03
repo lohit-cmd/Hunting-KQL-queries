@@ -1,0 +1,58 @@
+let prevalenceThreshold = 100;
+let lookbackWindow = 1h;
+// 1.  non-Microsoft .sys driver drops 
+let newDriversCore = DeviceFileEvents
+| where FileName endswith ".sys" and ActionType == "FileCreated"
+| project Timestamp,DeviceId,FileName, FolderPath, SHA1, InitiatingProcessFileName;
+// Optional: join to DeviceFileCertificateInfo for signature info and company name
+let newDrivers = newDriversCore
+| join kind=leftouter (
+    DeviceFileCertificateInfo
+    | project DeviceId, SHA1, IsSigned, Signer
+) on DeviceId, SHA1
+| where (isnull(IsSigned) or IsSigned == false) // unsigned
+    and (isnull(Signer) or Signer !has "Microsoft")
+| project Timestamp, DeviceId, FileName, FolderPath, SHA1, InitiatingProcessFileName, IsSigned, Signer;
+// Compute latest driver times 
+let minTs = toscalar(newDrivers | summarize min(Timestamp));
+let maxTs = toscalar(newDrivers | summarize max(Timestamp)) + lookbackWindow;
+// 2. Network anomalies
+let netAnomalies = DeviceNetworkEvents
+| where Timestamp  between (minTs .. maxTs)
+| where RemoteIPType in ("Public", "Reserved", "Teredo", "FourToSixMapping")
+      or RemotePort < 1024 or RemotePort > 49152
+| project DeviceId, NetTime = Timestamp, RemoteIP, RemotePort, InitiatingProcessFileName;
+// 3. Process history
+let procLineage = DeviceProcessEvents
+| where FileName in (newDrivers | distinct InitiatingProcessFileName)
+| project DeviceId, ProcessTime = Timestamp, 
+          InitiatingProcessFileName = FileName, 
+          ParentProcess = InitiatingProcessParentFileName;
+// 4. Device context
+let devInfo = DeviceInfo
+| project DeviceId, DeviceName, OSPlatform, OSVersion;
+// 5. Alert enrichment
+let alertEvidence = AlertEvidence
+| project AlertId, DeviceId, EvidenceRole, EntityType, SHA1, RemoteIP, ProcessCommandLine;
+// 6. Correlate 
+newDrivers
+| join kind=inner netAnomalies on DeviceId
+| join kind=leftouter procLineage on DeviceId, InitiatingProcessFileName
+| join kind=leftouter devInfo on DeviceId
+| join kind=leftouter alertEvidence on DeviceId, SHA1
+| extend Details = strcat(
+    "Driver:", FileName,
+    "; Unsigned:", tostring(IsSigned==false),
+    "; Signer:", iff(isnotempty(Signer), Signer, "Unknown"),
+    "; Net:", RemoteIP, ":", RemotePort,
+    "; ParentProc:", iff(isnotempty(ParentProcess), ParentProcess, "n/a"),
+    "; AlertRole:", iff(isnotempty(EvidenceRole), EvidenceRole, "n/a")
+)
+| project 
+    Time = NetTime, DeviceId, DeviceName, OSPlatform, OSVersion,
+    FileName, SHA1, FolderPath, IsSigned, Signer,
+    RemoteIP, RemotePort, ParentProcess,
+    AlertId, EvidenceRole, EntityType,
+    ProcessCommandLine, Details
+| where isnotempty(RemoteIP) or isnotempty(ParentProcess) or isnotempty(AlertId)
+| order by Time desc
