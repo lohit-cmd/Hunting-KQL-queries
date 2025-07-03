@@ -1,1 +1,1 @@
-
+A collection of practical, real-world KQL threat hunting queries to help defenders spot, investigate, and respond to cyber threats in Microsoft security environments. Built for hunters, by hunters—collaborate, learn, and stay a step ahead.
