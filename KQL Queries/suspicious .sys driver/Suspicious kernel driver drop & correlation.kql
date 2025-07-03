@@ -4,7 +4,6 @@ let lookbackWindow = 1h;
 let newDriversCore = DeviceFileEvents
 | where FileName endswith ".sys" and ActionType == "FileCreated"
 | project Timestamp,DeviceId,FileName, FolderPath, SHA1, InitiatingProcessFileName;
-// Optional: join to DeviceFileCertificateInfo for signature info and company name
 let newDrivers = newDriversCore
 | join kind=leftouter (
     DeviceFileCertificateInfo
@@ -34,7 +33,7 @@ let devInfo = DeviceInfo
 // 5. Alert enrichment
 let alertEvidence = AlertEvidence
 | project AlertId, DeviceId, EvidenceRole, EntityType, SHA1, RemoteIP, ProcessCommandLine;
-// 6. Correlate 
+// 6. Correlation
 newDrivers
 | join kind=inner netAnomalies on DeviceId
 | join kind=leftouter procLineage on DeviceId, InitiatingProcessFileName
