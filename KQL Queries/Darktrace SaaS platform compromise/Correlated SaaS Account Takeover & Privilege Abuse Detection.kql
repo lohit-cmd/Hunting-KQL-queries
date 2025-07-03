@@ -1,0 +1,55 @@
+let lookback = 1d;
+let criticalRoles = dynamic(["Global Administrator", "Exchange Administrator", "Privileged Role Administrator", "User Access Administrator"]);
+// 1. Suspicious sign-ins 
+let suspiciousSignins = SigninLogs
+| where TimeGenerated >= ago(lookback)
+| where ResultType == 0
+| summarize 
+    IPs = make_set(IPAddress, 5), 
+    NumIPs = dcount(IPAddress),
+    Countries = make_set(Location, 5),
+    NumCountries = dcount(Location),
+    Sessions = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    MaxRisk = maxif(RiskLevelDuringSignIn, isnotempty(RiskLevelDuringSignIn))
+    by UserPrincipalName, CorrelationId
+| where (NumIPs > 1 or NumCountries > 1 or Sessions > 3)
+    and (MaxRisk in ("high", "hidden"))
+| project UserPrincipalName, CorrelationId, IPs, Countries, Sessions, FirstSeen, LastSeen, MaxRisk;
+// 2. MFA bypass
+let mfaBypass = SigninLogs
+| where TimeGenerated >= ago(lookback)
+| where (ConditionalAccessStatus in ("failure", "notApplied") or (IsInteractive == false and RiskLevelDuringSignIn in ("high", "hidden", "medium")))
+| project UserPrincipalName, IPAddress, Location, TimeGenerated, ConditionalAccessStatus, IsInteractive, RiskLevelDuringSignIn;
+// 3. OAuth consent events
+let oauthConsent = AuditLogs
+| where TimeGenerated >= ago(lookback)
+| where OperationName has_any ("Consent to application", "Add delegated permission grant", "TokenIssued", "TokenRefresh", "Update application")
+    or ActivityDisplayName has_any ("Add app role assignment to service principal", "Add member to application")
+| project UserPrincipalName=Identity, OAuthOp=OperationName, OAuthAct=ActivityDisplayName, OAuthTime=TimeGenerated, OAuthResult=Result, OAuthTargets=TargetResources;
+// 4. Privilege escalation for critical roles 
+let privilegeEscalation = AuditLogs
+| where TimeGenerated >= ago(lookback)
+| where OperationName has "Add member to role"
+    or ActivityDisplayName has_any ("Add eligible member to role", "Add member to directory role")
+| mv-expand TargetResources
+| where tostring(TargetResources.displayName) in (criticalRoles)
+| project UserPrincipalName=Identity, PrivEscOp=OperationName, PrivEscAct=ActivityDisplayName, PrivEscTime=TimeGenerated, PrivEscResult=Result, RoleAdded=tostring(TargetResources.displayName);
+// correlation
+suspiciousSignins
+| join kind=inner (mfaBypass) on UserPrincipalName
+| join kind=leftouter (oauthConsent) on UserPrincipalName
+| join kind=leftouter (privilegeEscalation) on UserPrincipalName
+| extend
+    HasOAuth = iif(isnotempty(OAuthOp), "OAuth/Consent", ""),
+    HasPrivEsc = iif(isnotempty(PrivEscOp), "PrivEsc", "")
+| where HasOAuth != "" or HasPrivEsc != ""
+| project 
+    UserPrincipalName, CorrelationId, 
+    IPs, Countries, Sessions, FirstSeen, LastSeen, MaxRisk,
+    mfaBypass_Time=TimeGenerated, mfaBypass_Status=ConditionalAccessStatus,
+    oauthConsent_Time=OAuthTime, oauthConsent_Op=OAuthOp,
+    privilegeEscalation_Time=PrivEscTime, privilegeEscalation_Op=PrivEscOp, RoleAdded,
+    SignalsDetected=pack_array("SuspiciousSignIn","MFABypass",iff(HasOAuth!="","OAuthConsent",""),iff(HasPrivEsc!="","CriticalRoleAdded",""))
+| order by LastSeen desc
