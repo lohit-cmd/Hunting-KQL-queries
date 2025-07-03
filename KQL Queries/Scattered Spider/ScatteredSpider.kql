@@ -1,0 +1,65 @@
+let suspicious_signins = AADSignInEventsBeta
+| where AuthenticationRequirement has_any ("MFA", "2FA")
+      and (ErrorCode in (500121, 500133, 50076)
+           or ConditionalAccessStatus == 2
+           or UserAgent has_any ("okta", "vpn"))
+| summarize SigninFailCount=count(), Devices=make_set(DeviceName), Locations=make_set(Country) by AccountUpn, IPAddress, bin(Timestamp, 2h)
+| where SigninFailCount > 3;
+let suspicious_cloud_audit = CloudAuditEvents
+| where OperationName has_any ("Add authentication method", "Register device", "Consent to application", "Update authentication method")
+   or ActionType has_any ("ConsentGranted", "ConsentUpdated", "DeviceRegistered")
+| summarize AuditEventCount=count(), UserAgents=make_set(UserAgent) by IPAddress, bin(Timestamp, 2h)
+| where AuditEventCount > 2;
+let rmm_tools = DeviceProcessEvents
+| where FileName has_any ("anydesk.exe", "ngrok.exe", "remcos.exe", "teamviewer.exe", "ammyy.exe")
+   or ProcessCommandLine has_any ("--unattended", "--hidden", "--service")
+| summarize RMMCount=count(), Commands=make_set(ProcessCommandLine) by AccountUpn, DeviceId, bin(Timestamp, 2h)
+| where RMMCount > 0;
+let cred_dumping = DeviceProcessEvents
+| where ProcessCommandLine has_any ("lsass", "ntds.dit", "mimikatz", "dcsync", "sekurlsa")
+   or FileName has_any ("mimikatz.exe", "lsassy.exe", "procdump.exe")
+| summarize CredDumpCount=count(), DumpTools=make_set(FileName) by AccountUpn, DeviceId, bin(Timestamp, 2h)
+| where CredDumpCount > 0;
+let exfil = DeviceNetworkEvents
+| where RemoteUrl has_any ("mega.nz", "s3.amazonaws.com", "drive.google.com", "dropbox.com", "anonfiles.com")
+| summarize ExfilCount=count(), ExfilUrls=make_set(RemoteUrl) by InitiatingProcessAccountUpn, DeviceId, bin(Timestamp, 2h)
+| where ExfilCount > 0;
+// correlate these by AccountUpn, DeviceId, IP, and close time proximity.
+suspicious_signins
+| join kind=innerunique (
+    rmm_tools
+    | project AccountUpn, DeviceId, RMMTime=Timestamp, Commands
+) on AccountUpn
+| join kind=innerunique (
+    cred_dumping
+    | project AccountUpn, DeviceId, CredDumpTime=Timestamp, DumpTools
+) on AccountUpn, DeviceId
+| join kind=leftouter (
+    exfil
+    | project InitiatingProcessAccountUpn, DeviceId, ExfilTime=Timestamp, ExfilUrls
+) on $left.AccountUpn == $right.InitiatingProcessAccountUpn and $left.DeviceId == $right.DeviceId
+| join kind=leftouter (
+    suspicious_cloud_audit
+    | project IPAddress, CloudAuditTime=Timestamp, UserAgents
+) on IPAddress
+| where
+    abs(datetime_diff("hour", Timestamp, RMMTime)) <= 4
+    and abs(datetime_diff("hour", Timestamp, CredDumpTime)) <= 4
+    and (isnull(ExfilTime) or abs(datetime_diff("hour", Timestamp, ExfilTime)) <= 4)
+    and (isnull(CloudAuditTime) or abs(datetime_diff("hour", Timestamp, CloudAuditTime)) <= 4)
+| project
+    AccountUpn,
+    DeviceId,
+    IPAddress,
+    SigninFailCount,
+    Devices,
+    Locations,
+    Commands,
+    DumpTools,
+    ExfilUrls,
+    UserAgents,
+    SigninTime=Timestamp,
+    RMMTime,
+    CredDumpTime,
+    ExfilTime,
+    CloudAuditTime
