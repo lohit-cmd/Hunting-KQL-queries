@@ -1,44 +1,44 @@
-// Volt Typhoon Multi-TTP Correlation 
 let TimeWindow = 24h;
 let StageMinutes = 60;
-// Credential Dump 
+// Credential Dump
 let CredDumps = DeviceProcessEvents
 | where Timestamp >= ago(TimeWindow)
-| where (FileName == "ntdsutil.exe" and ProcessCommandLine has_all ("create","full"))
-   or (FileName == "rundll32.exe" and ProcessCommandLine has_any ("sekurlsa","lsass"))
+| where FileName in ("ntdsutil.exe","rundll32.exe")
+  and ProcessCommandLine has_any("create","full","sekurlsa","lsass")
 | project DeviceName, AccountName, CredTime = Timestamp, CmdCred = ProcessCommandLine;
-// Proxy Setup 
+// Proxy Setup
 let ProxySetup = DeviceProcessEvents
 | where Timestamp >= ago(TimeWindow)
 | where FileName == "netsh.exe" and ProcessCommandLine has "portproxy"
 | project DeviceName, AccountName, ProxyTime = Timestamp, CmdProxy = ProcessCommandLine;
-// Discovery Events (WMIC / PowerShell)
+// Discovery Behavior
 let Discovery = DeviceProcessEvents
 | where Timestamp >= ago(TimeWindow)
 | where FileName in ("powershell.exe","wmic.exe")
-  and ProcessCommandLine has_any ("Get-WmiObject","wmic","vssadmin","netsh","ping")
-| summarize DiscoveryCount = count(), FirstDisc = min(Timestamp) by DeviceName, AccountName
-| where DiscoveryCount >= 3
-| project DeviceName, AccountName, DiscoveryTime = FirstDisc, DiscoveryCount;
-// Suspicious Sign-In Patterns
-let SuspiciousSignins = SigninLogs
-| where TimeGenerated >= ago(TimeWindow)
-| where ClientAppUsed !in ("Browser", "Office365", "Mobile")
-| summarize SigninCount = count(), FirstSignin = min(TimeGenerated), LastSignin = max(TimeGenerated) by UserPrincipalName, IPAddress
-| where SigninCount >= 4
-| project AccountName = UserPrincipalName, IPAddress, FirstSignin, LastSignin, SigninCount;
-// Correlate with all Stages
+  and ProcessCommandLine has_any("Get-WmiObject","vssadmin","netsh","ping")
+| summarize DiscoveryCount = count(), DiscoveryTime = min(Timestamp)
+    by DeviceName, AccountName
+| where DiscoveryCount >= 3;
+// Suspicious Logons 
+let SuspiciousLogons = DeviceLogonEvents
+| where Timestamp >= ago(TimeWindow)
+| where ActionType == "LogonSuccess"
+  and LogonType in ("Interactive","Remote interactive","Network")
+| summarize LogonCount = count(), FirstLogon = min(Timestamp)
+    by AccountName, DeviceName
+| where LogonCount >= 3;
+// Correlate for all Stages
 CredDumps
 | join kind=leftouter ProxySetup on DeviceName, AccountName
 | join kind=leftouter Discovery on DeviceName, AccountName
-| join kind=leftouter SuspiciousSignins on AccountName
+| join kind=leftouter SuspiciousLogons on DeviceName, AccountName
 | extend DeltaCredToProxy = abs(datetime_diff('minute', ProxyTime, CredTime))
-| where isnotempty(CredTime) and isnotempty(ProxyTime) and isnotempty(DiscoveryTime) and isnotempty(FirstSignin)
 | where DeltaCredToProxy <= StageMinutes
-| project AccountName, DeviceName,
+| project
+    AccountName, DeviceName,
     CredTime, CmdCred,
     ProxyTime, CmdProxy,
     DiscoveryTime, DiscoveryCount,
-    FirstSignin, LastSignin, SigninCount, IPAddress,
+    FirstLogon, LogonCount,
     DeltaCredToProxy
 
