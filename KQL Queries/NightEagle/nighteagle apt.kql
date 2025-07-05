@@ -1,0 +1,33 @@
+// 1. Suspicious .NET loader in w3wp.exe, excluding known benign DLLs and paths
+let SuspiciousImageLoads = DeviceImageLoadEvents
+| where InitiatingProcessFileName =~ "w3wp.exe"
+| where FileName endswith ".dll" or FileName endswith ".exe"
+| where not(FileName has_any ("System.Web.dll", "Microsoft.Web.dll", "AspNetCoreModule.dll", "Newtonsoft.Json.dll", "EntityFramework.dll", "Microsoft.Extensions.Hosting.dll"))
+| where not(FolderPath has_any (@"\Microsoft\ASP.NET", @"\Windows\assembly\", @"\Program Files (x86)\Reference Assemblies\"))
+| extend Hash = SHA256, Detection = "Suspicious .NET loader in IIS";
+// 2. Scheduled chisel tasks that triggers every 4 hours
+let ChiselScheduled = DeviceProcessEvents
+| where FileName =~ "schtasks.exe"
+| where ProcessCommandLine has "-create"
+| where ProcessCommandLine has "chisel"
+| where ProcessCommandLine matches regex @"(/sc\s+hourly).*(/mo\s+4)"
+| extend Detection = "Scheduled Chisel task (4 hr)";
+// 3. Outbound SOCKS‑like traffic over 443 by suspicious processes
+let ProxyTraffic = DeviceNetworkEvents
+| where RemotePort == 443 and Protocol == "TCP"
+| where InitiatingProcessFileName has_any("chisel", "w3wp.exe")
+| where RemoteUrl has_any("socks", "proxy")
+    or RemoteIPType == "Public" // leverages actual field from schema :contentReference[oaicite:1]{index=1}
+| extend Detection = "Outbound SOCKS‑like traffic";
+// 4. Combine all detections
+SuspiciousImageLoads
+| project Timestamp, DeviceName, AccountName=InitiatingProcessAccountUpn, InitiatingProcessFileName, Detection, FileName, Hash
+| union (
+    ChiselScheduled
+    | project Timestamp, DeviceName, AccountName=InitiatingProcessAccountUpn, InitiatingProcessFileName=FileName, Detection, Detail=ProcessCommandLine, Hash=""
+)
+| union (
+    ProxyTraffic
+    | project Timestamp, DeviceName, AccountName=InitiatingProcessAccountUpn, InitiatingProcessFileName, Detection, Detail=strcat(RemoteIP, " ", RemoteUrl), Hash=""
+)
+| sort by Timestamp asc
