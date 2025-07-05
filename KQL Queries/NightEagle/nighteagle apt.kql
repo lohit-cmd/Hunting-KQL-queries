@@ -17,7 +17,7 @@ let ProxyTraffic = DeviceNetworkEvents
 | where RemotePort == 443 and Protocol == "TCP"
 | where InitiatingProcessFileName has_any("chisel", "w3wp.exe")
 | where RemoteUrl has_any("socks", "proxy")
-    or RemoteIPType == "Public" // leverages actual field from schema :contentReference[oaicite:1]{index=1}
+    or RemoteIPType == "Public" 
 | extend Detection = "Outbound SOCKS‑like traffic";
 // 4. Combine all detections
 SuspiciousImageLoads
