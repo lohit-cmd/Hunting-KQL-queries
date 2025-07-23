@@ -1,3 +1,4 @@
+// https://thehackernews.com/2025/07/new-coyote-malware-variant-exploits.html
 // 1. Detect UIAutomationCore.dll loaded by non-whitelisted processes
 let dllLoads = DeviceImageLoadEvents
 | where Timestamp > ago(7d)
