@@ -1,4 +1,3 @@
-// https://cloud.google.com/blog/topics/threat-intelligence/defending-vsphere-from-unc3944/
 // 1. Detect UIAutomationCore.dll loaded by non-whitelisted processes
 let dllLoads = DeviceImageLoadEvents
 | where Timestamp > ago(7d)
