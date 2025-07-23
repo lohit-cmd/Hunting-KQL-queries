@@ -1,0 +1,37 @@
+// 1. Detect UIAutomationCore.dll loaded by non-whitelisted processes
+let dllLoads = DeviceImageLoadEvents
+| where Timestamp > ago(7d)
+| where FileName endswith "UIAutomationCore.dll"
+| where InitiatingProcessFileName !in ("explorer.exe","mmc.exe","AccessibilityTool.exe","Narrator.exe")
+| project dllTime=Timestamp, DeviceId, DeviceName, AccountUpn=InitiatingProcessAccountUpn, Initiator=InitiatingProcessFileName;
+// 2. Detect processes invoking UI Automation interfaces
+let uiaExec = DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where FileName in ("powershell.exe","cscript.exe","wscript.exe","cmd.exe","python.exe","node.exe","dotnet.exe")
+| where ProcessCommandLine has_any("CUIAutomation","uiautomation")
+| project execTime=Timestamp, DeviceId, AccountUpn=InitiatingProcessAccountUpn, Executor=FileName, CmdLine=ProcessCommandLine;
+// 3. Capture elevated process creation (full token)
+let elevatedExec = DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where ProcessTokenElevation == "TokenElevationTypeFull"
+| project elevTime=Timestamp, DeviceId, AccountUpn=InitiatingProcessAccountUpn, ElevatedBy=FileName, ElevCmd=ProcessCommandLine;
+// 4. Detect persistence via Run key writes
+let registryPersist = DeviceRegistryEvents
+| where Timestamp > ago(7d)
+| where RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\Run"
+| where RegistryValueData has ".exe"
+| project perTime=Timestamp, DeviceId, AccountUpn=InitiatingProcessAccountUpn, Key=RegistryKey, ValueData=RegistryValueData;
+// 5. Correlate all behaviors within ±15 minutes
+dllLoads
+| join kind=inner uiaExec on DeviceId, AccountUpn
+| where abs(datetime_diff('minute', execTime, dllTime)) <= 15
+| join kind=leftouter elevatedExec on DeviceId, AccountUpn
+| where abs(datetime_diff('minute', elevTime, dllTime)) <= 15
+| join kind=leftouter registryPersist on DeviceId, AccountUpn
+| where abs(datetime_diff('minute', perTime, dllTime)) <= 15
+| project DeviceName, AccountUpn,
+         dllTime, Initiator,
+         execTime, Executor, CmdLine,
+         elevTime, ElevatedBy, ElevCmd,
+         perTime, Key, ValueData
+
