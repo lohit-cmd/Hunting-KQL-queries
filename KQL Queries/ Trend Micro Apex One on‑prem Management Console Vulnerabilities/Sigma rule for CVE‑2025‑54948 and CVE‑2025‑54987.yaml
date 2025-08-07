@@ -1,0 +1,32 @@
+title: Trend Micro Apex One Console Command Injection (CVE-2025-54948/54987) — Refined
+id: a1b2c3d4-5678-90ab-cdef-1234567890ab
+status: experimental
+description: |
+  Detects probable OS command injection attempts targeting Trend Micro Apex One on-prem console via console-specific URI patterns and injection syntax, enriched by context to reduce false positives.
+author: Detection Team
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-54948
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-54987
+  - https://thehackernews.com/2025/08/trend-micro-confirms-active.html
+tags:
+  - attack.execution
+  - cve-2025-54948
+  - cve-2025-54987
+  - command injection
+logsource:
+  category: web
+  product: apex_one_console
+detection:
+  selection:
+    dest_port:
+      - 8080
+      - 4343
+    uri_path:
+      - "/apexone/console"           # adjust for actual console path
+    http_request|contains:
+      - "$("
+      - ";"
+  condition: selection and repeat.http_request >= 3 within 5m
+falsepositives:
+  - Administrative scripts or automated health checks that use semicolons or command-like syntax.
+level: high
