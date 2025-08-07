@@ -1,0 +1,17 @@
+// Detect suspicious uploads or command behavior to Apex One console endpoints
+let apex_ports = dynamic([8080, 4343]);
+DeviceNetworkEvents
+| where RemotePort in (apex_ports) and ActionType == "ConnectionSuccess"
+// Filter connections to the Apex One console, likely from AdminConsole process or IUSR activity
+| where InitiatingProcessFileName has_any ("iisexpress.exe", "w3wp.exe", "svchost.exe") or InitiatingProcessAccountName == "IUSR"
+| extend Src = RemoteUrl
+| project Timestamp, DeviceName, Src, InitiatingProcessFileName, InitiatingProcessCommandLine, RemotePort, ReportId
+| join kind=inner (
+    DeviceFileEvents
+    | where FileName endswith ".exe" or FileName endswith ".dll" or FileName endswith ".bat"
+    | where ActionType in ("FileCreated", "FileCopied", "FileModified")
+    | project FileTimestamp=Timestamp, DeviceName, FileName, FolderPath, ReportId
+) on DeviceName, ReportId
+| where FileName has_any ("payload", "cmd", "sh", "exec", "inject") or InitiatingProcessCommandLine has_any ("&", ";", "|", "$(", "`", "powershell", "cmd.exe", "curl", "Invoke-Expression")
+| project Timestamp, FileTimestamp, DeviceName, Src, RemotePort, InitiatingProcessFileName, InitiatingProcessCommandLine, FileName, FolderPath
+
