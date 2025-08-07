@@ -1,0 +1,79 @@
+description: Detect suspicious uploads or command behavior to Apex One console endpoints
+apex_ports:
+  - 8080
+  - 4343
+query_steps:
+  - step: Filter DeviceNetworkEvents for successful connections to Apex One console endpoints
+    from: DeviceNetworkEvents
+    where:
+      RemotePort_in: apex_ports
+      ActionType: ConnectionSuccess
+  - step: Filter by initiating process (AdminConsole or IUSR)
+    where:
+      or:
+        - InitiatingProcessFileName_has_any:
+            - iisexpress.exe
+            - w3wp.exe
+            - svchost.exe
+        - InitiatingProcessAccountName: IUSR
+    extend:
+      Src: RemoteUrl
+    project:
+      - Timestamp
+      - DeviceName
+      - Src
+      - InitiatingProcessFileName
+      - InitiatingProcessCommandLine
+      - RemotePort
+      - ReportId
+  - step: Join with DeviceFileEvents based on DeviceName and ReportId
+    join:
+      kind: inner
+      with: DeviceFileEvents
+      where:
+        FileName_endswith_any:
+          - .exe
+          - .dll
+          - .bat
+        ActionType_in:
+          - FileCreated
+          - FileCopied
+          - FileModified
+      project:
+        FileTimestamp: Timestamp
+        DeviceName: DeviceName
+        FileName: FileName
+        FolderPath: FolderPath
+        ReportId: ReportId
+    on:
+      - DeviceName
+      - ReportId
+  - step: Filter for suspicious file names or command lines
+    where:
+      or:
+        - FileName_has_any:
+            - payload
+            - cmd
+            - sh
+            - exec
+            - inject
+        - InitiatingProcessCommandLine_has_any:
+            - "&"
+            - ";"
+            - "|"
+            - "$("
+            - "`"
+            - powershell
+            - cmd.exe
+            - curl
+            - Invoke-Expression
+    project:
+      - Timestamp
+      - FileTimestamp
+      - DeviceName
+      - Src
+      - RemotePort
+      - InitiatingProcessFileName
+      - InitiatingProcessCommandLine
+      - FileName
+      - FolderPath
