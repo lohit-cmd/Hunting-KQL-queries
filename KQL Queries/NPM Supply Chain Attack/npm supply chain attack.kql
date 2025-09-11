@@ -1,0 +1,68 @@
+let StartTime = ago(7d);
+let TimeWindow = 10m;
+let PkgMgr = dynamic(["npm","npm.cmd","npx","npx.cmd","yarn","yarnpkg","pnpm","pnpm.exe"]);
+// A) npm/yarn/pnpm -> rundll32.exe with node-gyp.dll in command line
+let A_proc =
+DeviceProcessEvents
+| where Timestamp >= StartTime
+| where FileName =~ "rundll32.exe"
+| where ProcessCommandLine has_cs "node-gyp.dll"
+| where InitiatingProcessFileName in~ (PkgMgr)
+| project Timestamp, DeviceId, DeviceName,
+          Signal="A_proc_rundll32_nodegyp",
+          Parent=InitiatingProcessFileName, ParentCmd=InitiatingProcessCommandLine,
+          Child=FileName, ChildCmd=ProcessCommandLine;
+// B) Image-load confirmation: rundll32 actually mapped node-gyp.dll
+let B_img =
+DeviceImageLoadEvents
+| where Timestamp >= StartTime
+| where InitiatingProcessFileName =~ "rundll32.exe"
+| where FileName endswith_cs "node-gyp.dll"
+| project Timestamp, DeviceId, DeviceName,
+          Signal="B_imgload_nodegyp",
+          Loader=InitiatingProcessFileName, ImageLoaded=FileName, FolderPath;
+// C) File creation/modification of node-gyp.dll during npm install paths and lineage
+let C_file =
+DeviceFileEvents
+| where Timestamp >= StartTime
+| where ActionType in ("FileCreated","FileModified","FileRenamed")
+| where FileName =~ "node-gyp.dll"
+| where FolderPath has_any (@"\node_modules\", @"\AppData\Local\npm-cache\", @"\ProgramData\npm\", @"\Users\")
+| where InitiatingProcessFileName in~ (PkgMgr) or InitiatingProcessFileName in~ (dynamic(["node.exe","node"]))
+| project Timestamp, DeviceId, DeviceName,
+          Signal="C_file_nodegyp_created",
+          FileName1=FileName, FolderPath,
+          Parent=InitiatingProcessFileName, ParentCmd=InitiatingProcessCommandLine;
+// D) Postinstall/installer script executed by node under a package manager
+let D_post =
+DeviceProcessEvents
+| where Timestamp >= StartTime
+| where FileName in~ (dynamic(["node.exe","node"]))
+| where ProcessCommandLine has_any ("install.js","postinstall")
+| where InitiatingProcessFileName in~ (PkgMgr)
+| project Timestamp, DeviceId, DeviceName,
+          Signal="D_postinstall_node",
+          Parent=InitiatingProcessFileName, ParentCmd=InitiatingProcessCommandLine,
+          Child=FileName, ChildCmd=ProcessCommandLine;
+// Correlate by 10m window; require >=2 signals (TTP-only)
+union A_proc, B_img, C_file, D_post
+| extend WindowStart = bin(Timestamp, TimeWindow)
+| summarize
+    FirstSeen = min(Timestamp),
+    LastSeen  = max(Timestamp),
+    Signals   = make_set(Signal),
+    CountSignals = dcount(Signal),
+    Examples  = make_set(pack(
+                   "Signal", Signal,
+                   "When", Timestamp,
+                   "Info1", tostring(coalesce(Parent, Loader, Child)),
+                   "Info2", tostring(coalesce(ParentCmd, ChildCmd, ImageLoaded, FileName1, FolderPath))
+                 ), 10),
+    SampleCmds = make_set_if(ChildCmd, Signal == "A_proc_rundll32_nodegyp", 3)
+  by DeviceId, DeviceName, WindowStart
+| where CountSignals >= 2
+| project
+    DeviceName, DeviceId, WindowStart, FirstSeen, LastSeen, Signals, CountSignals, Examples, SampleCmds,
+    Confidence = iff(CountSignals >= 3, "High", "Medium"),
+    Verdict = "Probable compromised npm install chain (install.js → rundll32 → node-gyp.dll)"
+
