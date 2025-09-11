@@ -1,0 +1,95 @@
+title: NPM Supply-Chain (Scavenger) – Correlated rundll32 + node-gyp.dll Load
+id: 00007-007-0097-9e35-000000071
+status: stable
+description: >
+  Correlates npm/yarn/pnpm spawning rundll32.exe with node-gyp.dll in
+  the command line
+
+  AND rundll32.exe actually loading node-gyp.dll within 10 minutes on the same host.
+
+  High-fidelity behavioral detection of the 2025 NPM supply-chain attack chain.
+author: lohit
+date: 2025/09/10
+references:
+  - https://www.crowdstrike.com/en-us/blog/crowdstrike-falcon-prevents-npm-package-supply-chain-attacks/
+tags:
+  - attack.T1195
+  - attack.T1218.011
+  - attack.T1059.007
+  - attack.T1553
+  - supply_chain
+level: high
+
+---
+title: Rundll32 Invoked By NPM With node-gyp.dll In Command Line
+name: scavenger_a_proc
+status: stable
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  sel_child:
+    Image|endswith: \rundll32.exe
+  sel_cmd:
+    CommandLine|contains: node-gyp.dll
+  sel_parent_pkgmgr:
+    ParentImage|endswith:
+      - \npm.exe
+      - \npm.cmd
+      - \npx.exe
+      - \npx.cmd
+      - \yarn.exe
+      - \yarnpkg.exe
+      - \pnpm.exe
+  sel_parent_node:
+    ParentImage|endswith: \node.exe
+  condition: sel_child and sel_cmd and (sel_parent_pkgmgr or sel_parent_node)
+fields:
+  - Image
+  - CommandLine
+  - ParentImage
+  - ParentCommandLine
+  - User
+falsepositives:
+  - Very rare; validate bespoke build tooling if present
+level: high
+
+---
+title: Rundll32 ImageLoad Of node-gyp.dll
+name: scavenger_b_img
+status: stable
+logsource:
+  product: windows
+  category: image_load
+detection:
+  sel_loader:
+    Image|endswith: \rundll32.exe
+  sel_dll:
+    ImageLoaded|endswith: \node-gyp.dll
+  condition: sel_loader and sel_dll
+fields:
+  - Image
+  - ImageLoaded
+  - Signed
+  - Hashes
+falsepositives:
+  - Unknown; investigate all hits, do the due diligence analysis for whitelisting FP hits
+level: high
+
+---
+title: NPM Supply-Chain (Scavenger) – Temporal Correlation (A + B in 10m)
+status: stable
+correlation:
+  type: temporal
+  rules:
+    - scavenger_a_proc
+    - scavenger_b_img
+  group-by:
+    - Computer
+  timespan: 10m
+  generate: true
+tags:
+  - correlation
+  - attack.T1195
+  - attack.T1218.011
+level: high
